@@ -44,16 +44,35 @@
     { label: "求职意向", key: "_flat", repeatable: false },
     { label: "其他信息", key: "_flat", repeatable: false },
     { label: "自我描述", key: "_flat", repeatable: false },
+    { label: "自我评价", key: "_flat", repeatable: false },
+    { label: "个人评价", key: "_flat", repeatable: false },
+    { label: "个人总结", key: "_flat", repeatable: false },
     { label: "声明", key: "_flat", repeatable: false },
     { label: "更新说明", key: "_flat", repeatable: false },
     { label: "工作经历", key: "work", repeatable: true },
+    { label: "工作经验", key: "work", repeatable: true },
+    { label: "全职工作", key: "work", repeatable: true },
+    { label: "工作履历", key: "work", repeatable: true },
     { label: "实习经历", key: "internship", repeatable: true },
+    { label: "实习经验", key: "internship", repeatable: true },
     { label: "项目经验", key: "project", repeatable: true },
     { label: "项目经历", key: "project", repeatable: true },
+    { label: "项目实践", key: "project", repeatable: true },
+    { label: "在校项目", key: "project", repeatable: true },
     { label: "教育背景", key: "education", repeatable: true },
     { label: "教育经历", key: "education", repeatable: true },
+    { label: "教育信息", key: "education", repeatable: true },
+    { label: "教育情况", key: "education", repeatable: true },
+    { label: "学历信息", key: "education", repeatable: true },
     { label: "语言能力", key: "language", repeatable: true },
+    { label: "语言水平", key: "language", repeatable: true },
+    { label: "外语能力", key: "language", repeatable: true },
+    { label: "外语水平", key: "language", repeatable: true },
     { label: "获奖经历", key: "award", repeatable: true },
+    { label: "获奖情况", key: "award", repeatable: true },
+    { label: "奖励情况", key: "award", repeatable: true },
+    { label: "荣誉奖励", key: "award", repeatable: true },
+    { label: "荣誉奖项", key: "award", repeatable: true },
   ];
   const SECTION_BY_LABEL = Object.fromEntries(SECTION_DEFS.map((s) => [s.label, s]));
 
@@ -151,13 +170,30 @@
     return normalize(textOf(clone));
   }
 
-  // 精确匹配优先；长标题（如「校招站点（本次校招主要采取……）」）按前缀归并
+  // 模糊兜底规则：关键词命中 + 结构后缀白名单，排除意向/地点类干扰标题
+  const FUZZY_RULES = [
+    { re: /教育|学历/, key: "education" },
+    { re: /实习/, key: "internship" },
+    { re: /项目/, key: "project" },
+    { re: /工作/, key: "work" },
+    { re: /语言|外语/, key: "language" },
+    { re: /获奖|荣誉|奖励/, key: "award" },
+  ];
+  const FUZZY_SUFFIX_RE = /(经历|经验|背景|信息|情况|实践|履历|奖励|奖项|能力|水平)$/;
+  const FUZZY_EXCLUDE_RE = /意向|期望|地点|城市|年限|薪资/;
+
+  // 精确匹配优先；长标题（如「校招站点（本次校招主要采取……）」）按前缀归并；
+  // 字典未收录的变体走带护栏的关键词模糊兜底（如「教育背景信息」→ education）
   function canonicalSection(rawTitle) {
     const t = normalize(rawTitle);
     if (!t) return null;
     if (SECTION_BY_LABEL[t]) return SECTION_BY_LABEL[t];
     for (const def of SECTION_DEFS) {
       if (t.length > def.label.length && t.startsWith(def.label)) return def;
+    }
+    if (!FUZZY_EXCLUDE_RE.test(t) && FUZZY_SUFFIX_RE.test(t)) {
+      const rule = FUZZY_RULES.find((r) => r.re.test(t));
+      if (rule) return { label: t, key: rule.key, repeatable: true };
     }
     return null;
   }
@@ -797,7 +833,7 @@
       if (!label) return null;
       // 允许传 sectionKey（如 "education"）或区块标题（如 "教育背景"）
       const def = SECTION_BY_LABEL[normalize(label)] || SECTION_DEFS.find((d) => d.key === normalize(label));
-      return findAddButtonForSection(def ? def.label : label, context || {});
+      return findAddButtonForSection(def || { label, key: null }, context || {});
     },
 
     // 条目补齐：快照条数 > 页面条数的 repeater 区块，逐次点击「添加」。
@@ -813,12 +849,15 @@
         have[key] = Math.max(have[key] || 0, idx + 1);
       }
       let clicked = 0;
+      const processedKeys = new Set(); // 同义标题共享 key，每个区块只补一次
       for (const def of SECTION_DEFS) {
         if (!def.repeatable || !moka.capabilities.addItem[def.key]) continue;
+        if (processedKeys.has(def.key)) continue;
+        processedKeys.add(def.key);
         const need = Array.isArray(snapshot[def.key]) ? snapshot[def.key].length : 0;
         const gap = need - (have[def.key] || 0);
         if (gap <= 0) continue;
-        const btn = findAddButtonForSection(def.label, ctx);
+        const btn = findAddButtonForSection(def, ctx);
         if (!btn) continue;
         for (let i = 0; i < gap; i++) {
           dispatchClick(btn);
@@ -831,14 +870,17 @@
   };
 
   // 区块标题行内的「添加」按钮（剔除标题文本自身，取最深层匹配元素）
-  function findAddButtonForSection(sectionLabel, context) {
+  // 同义标题按 sectionKey 比较（「教育信息」与「教育背景」同属 education）；
+  // 无法归并的标题回退按原始文字比较
+  function findAddButtonForSection(want, context) {
     const doc = docOf(context);
     if (!doc) return null;
     for (const block of qsa(doc, BLOCK_SEL)) {
       const titleEl = first(block, BLOCK_TITLE_SEL);
-      // 用 canonicalSection 归并（长标题前缀匹配），与区块识别保持一致
       const def = canonicalSection(titleText(titleEl));
-      if (!def || def.label !== sectionLabel) continue;
+      if (!def) continue;
+      const same = want.key && def.key !== "_flat" ? def.key === want.key : def.label === want.label;
+      if (!same) continue;
       const cands = qsa(titleEl, "button, a, span, div").filter((el) => isVisible(el) && /添加/.test(textOf(el)));
       const leaves = cands.filter((c) => !cands.some((o) => o !== c && contains(c, o)));
       if (leaves.length) return leaves[0];

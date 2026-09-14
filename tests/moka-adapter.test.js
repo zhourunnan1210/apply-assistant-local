@@ -55,6 +55,18 @@ class FakeElement {
     this.parentElement = null;
   }
 
+  // 与真实 DOM 对齐：titleText 等逻辑依赖 cloneNode(true) 后剔除按钮等噪音元素
+  cloneNode(deep) {
+    const copy = new FakeElement(this.tagName, {
+      className: this._className, id: this.id, text: this._text, type: this.type,
+      value: this.value, placeholder: this.placeholder, attributes: this.attributesMap,
+    });
+    copy.checked = this.checked;
+    copy.style = Object.assign({}, this.style);
+    if (deep) for (const child of this.children) copy.append(child.cloneNode(true));
+    return copy;
+  }
+
   contains(element) {
     if (this === element) return true;
     return this.children.some((child) => child.contains(element));
@@ -777,11 +789,48 @@ async function testManualOnlyAndAddItem(ctx, fixture) {
   assert.equal(await NS.adapterRegistry.invoke("moka", "writeControl", [sync, "x", {}]), false);
 }
 
+function testSectionTitleVariants(ctx) {
+  const NS = ctx.window.__WSZ;
+  const merged = NS.mergedRules(seed, "moka");
+  const scanOne = (title) => {
+    const doc = new FakeDocument();
+    doc.body.append(applyBlock(title, true, itemWrapper(stringField("学校名称"))));
+    const fields = NS.adapterRegistry.scanFields("moka", { document: doc, location: ctx.location, mergedRules: merged, provider: { key: "moka" } });
+    return { doc, field: fields.find((f) => f.label === "学校名称") };
+  };
+  // 字典变体 + 前缀归并 + 纯模糊命中：都应归并到正确的 sectionKey
+  const cases = [
+    ["教育经历", "education"], ["教育信息", "education"], ["学历信息", "education"], ["教育情况", "education"],
+    ["实习经验", "internship"],
+    ["项目实践", "project"], ["在校项目", "project"],
+    ["工作经验", "work"], ["工作履历", "work"], ["全职工作", "work"],
+    ["语言水平", "language"], ["外语能力", "language"], ["外语水平", "language"],
+    ["获奖情况", "award"], ["荣誉奖励", "award"], ["荣誉奖项", "award"],
+    ["获奖情况（省级以上）", "award"], // 前缀归并
+    ["校内实习经历", "internship"], ["工作背景", "work"], ["在校获奖情况", "award"], // 纯模糊命中
+  ];
+  for (const [title, key] of cases) {
+    const { field } = scanOne(title);
+    assert.ok(field, `「${title}」区块应被扫描到`);
+    assert.equal(field.sectionKey, key, `「${title}」应归并到 ${key}，实际 ${field.sectionKey}`);
+  }
+  // 干扰标题：排除词 / 非结构后缀，一律不得误归并
+  for (const title of ["期望工作城市", "工作地点", "实习意向", "工作年限", "期望薪资", "语言成绩"]) {
+    const { field } = scanOne(title);
+    assert.ok(!field || !field.sectionKey, `「${title}」不得归并进任何 repeater 区块，实际 ${field && field.sectionKey}`);
+  }
+  // 按 sectionKey 找添加按钮：变体标题区块也要能定位（键比较修复）
+  const { doc } = scanOne("教育信息");
+  const btn = NS.adapterRegistry.findAddButton("moka", "education", { document: doc });
+  assert.ok(btn && /添加/.test(btn.textContent), "「教育信息」区块应能按 education key 定位添加按钮");
+}
+
 async function main() {
   const fixture = buildFixture();
   const ctx = makeContext(fixture);
   testPlatformEvidence(ctx, fixture);
   testSectionsAndClassification(ctx, fixture);
+  testSectionTitleVariants(ctx);
   testRepeaterIdentity(ctx, fixture);
   await testSelectWriteUniqueAndDuplicate(ctx, fixture);
   await testDateRangeAndForever(ctx, fixture);
