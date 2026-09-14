@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "网申助手 · 本地版",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "本地简历快照 + 按服务商分层的规则匹配，一键填写网申表单（Moka / 北森 / 牛客 / 通用）。无联网、无登录、无 AI。",
   "permissions": ["storage"],
   "content_scripts": [
