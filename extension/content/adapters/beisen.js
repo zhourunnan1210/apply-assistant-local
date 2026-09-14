@@ -1,6 +1,6 @@
 /* 网申助手 · 北森 Adapter
  *
- * 这份实现只使用 BEISEN_REAL_SAMPLE_01 中确认过的结构：
+ * 这份实现只使用真实北森样本中确认过的结构：
  * .form-item / .form-item__text / .form-item__control 以及 Phoenix 组件的
  * 语义 class。随机生成的 group id、客户名称、职位 id 和 hash class 不参与
  * 字段 identity。没有被确认的控件仍返回 unknown/manual。
@@ -9,7 +9,7 @@
   const NS = (window.__WSZ = window.__WSZ || {});
   NS.adapterDefinitions = NS.adapterDefinitions || {};
 
-  const FORM_GROUP_SELECTOR = 'div.form[id*="Recruitment_extPerfect"]';
+  const FORM_GROUP_SELECTOR = "div.form";
   const FORM_ITEM_SELECTOR = ".form-item";
   const SELECT_SELECTOR = ".phoenix-select";
   const RADIO_ITEM_SELECTOR = ".phoenix-radio-group__radioItem";
@@ -30,6 +30,18 @@
     { label: "提交", key: "_flat", repeatable: false },
   ];
   const SECTION_BY_LABEL = Object.fromEntries(SECTION_DEFS.map((item) => [item.label, item]));
+
+  // Beisen exposes more than one generated form profile. The suffixes below
+  // are platform module names observed in real forms, not customer or job
+  // identifiers. Keep the allow-list narrow so an unrelated div.form does not
+  // become a business group by accident.
+  const PROFILE_B_MODULES = [
+    { marker: "Recruitment_PersonProfilePerfectResumeDefaultForm", section: "个人信息" },
+    { marker: "Recruitment_ApplicantObjectivePerfectResumeDefaultForm", section: "求职意向" },
+    { marker: "Recruitment_ApplicantEducationPerfectResumeDefaultForm", section: "教育经历" },
+    { marker: "Recruitment_ApplicantWorkExperiencePerfectResumeDefaultForm", section: "工作经历" },
+    { marker: "Recruitment_ApplicantProjectPerfectResumeDefaultForm", section: "项目经历" },
+  ];
 
   function docOf(context) {
     if (context && context.document) return context.document;
@@ -109,19 +121,27 @@
     return null;
   }
 
+  function profileForGroup(element) {
+    if (!element || String(element.tagName || "").toUpperCase() !== "DIV") return null;
+    const classes = classText(element).split(/\s+/).filter(Boolean);
+    if (!classes.includes("form")) return null;
+    const id = String(element.id || "");
+    if (id.includes("Recruitment_extPerfect")) return { key: "extPerfect", sectionHint: "" };
+    const module = PROFILE_B_MODULES.find((item) => id.includes(item.marker));
+    return module ? { key: "perfectResumeDefault", sectionHint: module.section, marker: module.marker } : null;
+  }
+
   function groupOf(element) {
-    const matched = closest(element, FORM_GROUP_SELECTOR);
-    if (matched) return matched;
     for (let current = element; current; current = current.parentElement) {
-      const classes = classText(current).split(/\s+/).filter(Boolean);
-      if (classes.includes("form") && String(current.id || "").includes("Recruitment_extPerfect")) return current;
+      if (profileForGroup(current)) return current;
     }
     return null;
   }
 
   function allGroups(doc) {
-    const values = qsa(doc, FORM_GROUP_SELECTOR).concat(qsa(doc, "div.form").filter((element) => String(element.id || "").includes("Recruitment_extPerfect")));
-    return values.filter((element, index, all) => all.indexOf(element) === index);
+    return qsa(doc, FORM_GROUP_SELECTOR)
+      .filter((element) => Boolean(profileForGroup(element)))
+      .filter((element, index, all) => all.indexOf(element) === index);
   }
 
   // The section title is a sibling of the generated form subtree. Search the
@@ -130,14 +150,24 @@
     if (!group) return "";
     for (let parent = group.parentElement, depth = 0; parent && depth < 10; parent = parent.parentElement, depth++) {
       const direct = parent.children ? Array.from(parent.children) : [];
-      const candidates = direct.concat(qsa(parent, "*")).filter((el, index, all) => all.indexOf(el) === index);
-      for (const candidate of candidates) {
+      // Prefer a direct sibling title. Profile B puts the title next to the
+      // ux-standard-form wrapper; Profile A may put it directly next to the
+      // form. This relation is more stable than hashed CSS-module classes.
+      for (const candidate of direct) {
         if (candidate === group || contains(group, candidate)) continue;
         const section = exactSection(textOf(candidate));
         if (section) return section;
       }
+      // Some Profile A pages wrap the title one level below the section shell.
+      // Keep this fallback scoped to the current ancestor and never use a
+      // title contained by another generated group.
+      const nested = qsa(parent, "*").filter((candidate) => {
+        if (candidate === group || contains(group, candidate) || contains(candidate, group)) return false;
+        return Boolean(exactSection(textOf(candidate)));
+      });
+      if (nested.length) return exactSection(textOf(nested[0]));
     }
-    return "";
+    return (profileForGroup(group) || {}).sectionHint || "";
   }
 
   function sectionTitleForElement(element) {
@@ -253,6 +283,7 @@
     }
     const doc = docOf(context);
     const groups = groupsForSection(doc, sectionInfo.section);
+    if (!groups.includes(group)) return { itemIndex: null, itemElement: null };
     const itemIndex = groups.indexOf(group);
     if (itemIndex < 0) return { itemIndex: null, itemElement: null };
     return { itemIndex, itemElement: group };
@@ -412,7 +443,12 @@
     const loc = locationOf(context);
     const pathname = String(loc.pathname || "");
     const hasWrapper = Boolean(doc && typeof doc.querySelector === "function" && doc.querySelector(".form-item .form-item__text") && doc.querySelector(".form-item .form-item__control"));
-    const hasGeneratedGroup = Boolean(doc && allGroups(doc).length);
+    const groups = doc ? allGroups(doc) : [];
+    const profiles = Array.from(new Set(groups.map((group) => {
+      const profile = profileForGroup(group);
+      return profile && profile.key;
+    }).filter(Boolean)));
+    const hasGeneratedGroup = groups.length > 0;
     const hasPhoenix = Boolean(doc && typeof doc.querySelector === "function" && doc.querySelector('[class*="phoenix-"]'));
     const hasBrand = Boolean(doc && doc.body && /Powered\s+by\s+Beisen/i.test(doc.body.textContent || ""));
     const pathLooksLikeForm = pathname === "/form" || /\/form\/$/.test(pathname);
@@ -421,7 +457,7 @@
     else if (isBeisenHost(context) && pathLooksLikeForm && hasWrapper && (hasGeneratedGroup || hasPhoenix || hasBrand)) status = "BEISEN_FORM_CONFIRMED";
     return {
       status,
-      evidence: { pathLooksLikeForm, hasWrapper, hasGeneratedGroup, hasPhoenix, hasBrand },
+      evidence: { pathLooksLikeForm, hasWrapper, hasGeneratedGroup, hasPhoenix, hasBrand, profiles },
     };
   }
 
@@ -988,6 +1024,11 @@
       const covered = new Set();
       for (const item of qsa(doc, FORM_ITEM_SELECTOR)) {
         if (!isVisible(item)) continue;
+        // Only scan form items belonging to a validated Beisen profile. This
+        // prevents unrelated Phoenix widgets elsewhere on a zhiye page from
+        // becoming fields, while keeping unknown valid controls visible in a
+        // confirmed group.
+        if (!groupOf(item)) continue;
         covered.add(item);
         for (const control of qsa(item, "input, textarea, select, .phoenix-select, .phoenix-radio-group__radioItem")) covered.add(control);
         fields.push(descriptorForItem(item, ctx));
@@ -1006,7 +1047,7 @@
     getFieldContainers(context) {
       if (formEvidence(context || {}).status !== "BEISEN_FORM_CONFIRMED") return [];
       const doc = docOf(context);
-      return qsa(doc, FORM_ITEM_SELECTOR).filter(isVisible);
+      return qsa(doc, FORM_ITEM_SELECTOR).filter((item) => isVisible(item) && Boolean(groupOf(item)));
     },
 
     getSection(container, context) {

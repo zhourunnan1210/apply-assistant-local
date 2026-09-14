@@ -384,6 +384,57 @@ function group(doc, title, key, children) {
   return form;
 }
 
+function profileBGroup(doc, title, moduleMarker, children) {
+  const formId = `fixture_${moduleMarker}`;
+  const titleNode = el("div", { className: "profile-section-title", id: formId, text: title });
+  const form = el("div", { className: "form twoLineFormStyleLong formStyleLeftAndRight", id: formId });
+  form.append(...children);
+  const shell = el("div", { className: "profile-section" }, titleNode,
+    el("div", { className: "ux-standard-form" }, form));
+  doc.body.append(shell);
+  return form;
+}
+
+function buildProfileBFixture() {
+  const doc = new FakeDocument();
+  doc.body.append(el("div", { text: "Powered by Beisen" }));
+  profileBGroup(doc, "个人信息", "Recruitment_PersonProfilePerfectResumeDefaultForm", [
+    formItem("姓名", input()),
+    formItem("邮箱", input()),
+    formItem("性别", el("div", {}, ...radioGroup(["男", "女"]))),
+  ]);
+  profileBGroup(doc, "求职意向", "Recruitment_ApplicantObjectivePerfectResumeDefaultForm", [
+    formItem("期望从事职业", input()),
+    formItem("期望工作城市", input()),
+  ]);
+  for (let i = 0; i < 2; i += 1) {
+    profileBGroup(doc, "教育经历", "Recruitment_ApplicantEducationPerfectResumeDefaultForm", [
+      formItem("学校名称", input()),
+      formItem("专业名称", input()),
+      formItem("学历", select(doc).component),
+      formItem("开始时间", dateSelect(doc, "month").component),
+      formItem("结束时间", dateSelect(doc, "month").component),
+    ]);
+  }
+  profileBGroup(doc, "工作经历", "Recruitment_ApplicantWorkExperiencePerfectResumeDefaultForm", [
+    formItem("公司名称", input()),
+    formItem("职位名称", input()),
+    formItem("开始时间", dateSelect(doc, "month").component),
+    formItem("结束时间", dateSelect(doc, "month").component),
+    formItem("工作职责", el("textarea", { className: "phoenix-textarea__realTextarea", value: "" })),
+  ]);
+  for (let i = 0; i < 2; i += 1) {
+    profileBGroup(doc, "项目经历", "Recruitment_ApplicantProjectPerfectResumeDefaultForm", [
+      formItem("项目名称", input()),
+      formItem("职务", input()),
+      formItem("开始时间", dateSelect(doc, "month").component),
+      formItem("结束时间", dateSelect(doc, "month").component),
+      formItem("项目描述", el("textarea", { className: "phoenix-textarea__realTextarea", value: "" })),
+    ]);
+  }
+  return { doc };
+}
+
 function buildFixture() {
   const doc = new FakeDocument();
   doc.body.append(el("div", { text: "Powered by Beisen" }));
@@ -431,11 +482,11 @@ function loadScript(file, context) {
   vm.runInNewContext(fs.readFileSync(path.join(ROOT, file), "utf8"), context, { filename: file });
 }
 
-function makeContext(fixture) {
+function makeContext(fixture, hostname = "flyaitalent.zhiye.com") {
   const ctx = {
     window: { __WSZ: {} },
     document: fixture.doc,
-    location: { hostname: "flyaitalent.zhiye.com", pathname: "/form", hash: "", search: "" },
+    location: { hostname, pathname: "/form", hash: "", search: "" },
     setTimeout,
     clearTimeout,
     Date,
@@ -796,6 +847,77 @@ async function testFallbackAndNonFormIsolation(ctx, fixture) {
   NS.scanFields = original;
 }
 
+function testProfileBStructure() {
+  const fixture = buildProfileBFixture();
+  const ctx = makeContext(fixture, "bestsemi.zhiye.com");
+  const NS = ctx.window.__WSZ;
+  const merged = NS.mergedRules(seed, "beisen");
+  const state = NS.beisenFormState({ document: fixture.doc, location: ctx.location });
+  assert.equal(state.status, "BEISEN_FORM_CONFIRMED");
+  assert.equal(state.evidence.profiles.includes("perfectResumeDefault"), true);
+
+  const fields = NS.adapterRegistry.scanFields("beisen", {
+    document: fixture.doc,
+    location: ctx.location,
+    mergedRules: merged,
+    provider: { key: "beisen" },
+  });
+  assert.equal(fields.length, 30);
+
+  const personalName = fields.find((field) => field.section === "个人信息" && field.label === "姓名");
+  assert.ok(personalName);
+  assert.equal(personalName.sectionKey, null);
+  assert.equal(personalName.repeater.itemIndex, null);
+  assert.equal(NS.resolvePath(personalName, merged), "basicInfo.name");
+
+  const educationSchools = fields.filter((field) => field.sectionKey === "education" && field.label === "学校名称");
+  assert.equal(educationSchools.length, 2);
+  assert.equal(JSON.stringify(educationSchools.map((field) => field.repeater.itemIndex)), JSON.stringify([0, 1]));
+  assert.equal(JSON.stringify(educationSchools.map((field) => NS.resolvePath(field, merged))), JSON.stringify([
+    "education[0].school",
+    "education[1].school",
+  ]));
+
+  const workCompany = fields.find((field) => field.sectionKey === "work" && field.label === "公司名称");
+  assert.ok(workCompany);
+  assert.equal(workCompany.repeater.itemIndex, 0);
+  assert.equal(NS.resolvePath(workCompany, merged), "work[0].company");
+
+  const projectNames = fields.filter((field) => field.sectionKey === "project" && field.label === "项目名称");
+  assert.equal(projectNames.length, 2);
+  assert.equal(JSON.stringify(projectNames.map((field) => field.repeater.itemIndex)), JSON.stringify([0, 1]));
+  assert.equal(JSON.stringify(projectNames.map((field) => NS.resolvePath(field, merged))), JSON.stringify([
+    "project[0].name",
+    "project[1].name",
+  ]));
+
+  assert.equal(fields.some((field) => ["实习经历", "获奖情况", "证书", "技能"].includes(field.section)), false);
+  assert.equal(NS.adapterRegistry.canAddItem("beisen", "education"), false);
+
+  // A supported Profile B id outside the current document cannot establish an
+  // item position and must remain unmatched rather than becoming item 0.
+  const detachedGroup = el("div", {
+    className: "form",
+    id: "detached_Recruitment_ApplicantEducationPerfectResumeDefaultForm",
+  });
+  const detachedItem = formItem("学校名称", input());
+  detachedGroup.append(detachedItem);
+  const detachedRepeater = NS.adapterRegistry.invoke("beisen", "getRepeaterItem", [
+    detachedItem,
+    { sectionKey: "education" },
+  ]);
+  assert.equal(detachedRepeater.itemIndex, null);
+  assert.equal(detachedRepeater.itemElement, null);
+  assert.equal(NS.resolvePath({
+    label: "学校名称",
+    section: "教育经历",
+    sectionKey: "education",
+    repeater: detachedRepeater,
+    index: 0,
+    kind: "text",
+  }, merged), null);
+}
+
 async function main() {
   const fixture = buildFixture();
   const ctx = makeContext(fixture);
@@ -806,6 +928,7 @@ async function main() {
   testRepeaterSafetyAndCoreBoundary(ctx, fixture);
   await testProviderReadWriteVerifyAndCapture(ctx, fixture);
   await testFallbackAndNonFormIsolation(ctx, fixture);
+  testProfileBStructure();
   console.log("PASS Beisen real-form adapter tests");
 }
 
